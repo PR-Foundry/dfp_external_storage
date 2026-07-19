@@ -3,10 +3,17 @@
 
 from types import SimpleNamespace
 
+import urllib3
 from frappe.tests.utils import FrappeTestCase
 
+import dfp_external_storage.dfp_external_storage.doctype.dfp_external_storage.dfp_external_storage as dfp_mod
 from dfp_external_storage.dfp_external_storage.doctype.dfp_external_storage.dfp_external_storage import (
+	DFP_S3_CONNECT_TIMEOUT,
+	DFP_S3_READ_TIMEOUT,
+	DFP_S3_RETRIES,
 	DFPExternalStorageFile,
+	MinioConnection,
+	dfp_bounded_http_client,
 	hook_file_after_delete,
 	hook_file_before_save,
 )
@@ -57,3 +64,56 @@ class TestDFPExternalStorage(FrappeTestCase):
 		self.assertFalse(hasattr(non_dfp_file, "dfp_external_storage_upload_file"))
 		self.assertIsNone(hook_file_before_save(non_dfp_file, "before_save"))
 		self.assertIsNone(hook_file_after_delete(non_dfp_file, "after_delete"))
+
+	def test_bounded_http_client_timeouts(self):
+		"""framework#95 (origin Floreer-Africa/framework#126): dfp streams every
+		external-storage image through the gunicorn worker, and minio's default
+		urllib3 pool waits 300s with 5 retries — a stalled S3 endpoint therefore
+		pins a worker far past its request timeout and a burst of cold-cache fetches
+		can exhaust the pool and take a site down. dfp_bounded_http_client() must
+		return a urllib3 pool whose timeouts/retries are the short, fail-fast values,
+		so a stall frees the worker instead of pinning it.
+		"""
+		pool = dfp_bounded_http_client()
+
+		self.assertIsInstance(pool, urllib3.PoolManager)
+
+		timeout = pool.connection_pool_kw["timeout"]
+		self.assertIsInstance(timeout, urllib3.Timeout)
+		self.assertEqual(timeout.connect_timeout, DFP_S3_CONNECT_TIMEOUT)
+		self.assertEqual(timeout._read, DFP_S3_READ_TIMEOUT)
+
+		retries = pool.connection_pool_kw["retries"]
+		self.assertIsInstance(retries, urllib3.Retry)
+		self.assertEqual(retries.total, DFP_S3_RETRIES)
+
+	def test_minio_connection_wires_bounded_client(self):
+		"""The bounded pool is useless unless MinioConnection actually hands it to
+		the minio Client, so a real deployment gets the fail-fast timeouts. Capture
+		the http_client kwarg the constructor passes to Minio (no network needed) and
+		assert it is a bounded pool carrying framework#95's timeouts.
+		"""
+		captured = {}
+
+		def fake_minio(**kwargs):
+			captured.update(kwargs)
+			return SimpleNamespace(**kwargs)
+
+		original_minio = dfp_mod.Minio
+		dfp_mod.Minio = fake_minio
+		try:
+			MinioConnection(
+				endpoint="s3.example.test",
+				access_key="ak",
+				secret_key="sk",
+				region="us-east-1",
+				secure=True,
+			)
+		finally:
+			dfp_mod.Minio = original_minio
+
+		http_client = captured.get("http_client")
+		self.assertIsInstance(http_client, urllib3.PoolManager)
+		timeout = http_client.connection_pool_kw["timeout"]
+		self.assertEqual(timeout.connect_timeout, DFP_S3_CONNECT_TIMEOUT)
+		self.assertEqual(timeout._read, DFP_S3_READ_TIMEOUT)
