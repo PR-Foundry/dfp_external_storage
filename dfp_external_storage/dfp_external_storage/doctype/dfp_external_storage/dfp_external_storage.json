@@ -24,6 +24,7 @@
   "presigned_urls",
   "presigned_url_expiration",
   "presigned_mimetypes_starting",
+  "route_mimetypes_starting",
   "doctypes_ignored",
   "column_break_clee",
   "remote_size_enabled",
@@ -160,6 +161,12 @@
    "fieldname": "presigned_mimetypes_starting",
    "fieldtype": "Small Text",
    "label": "Use presigned urls only for mime types starting with: (one per line)"
+  },
+  {
+   "description": "File-type routing. When a File has no explicit storage selected, it is uploaded to the ENABLED storage whose prefix best matches the file's guessed mime type, evaluated BEFORE folder routing. Example: set <code>image/</code> on a Cloudflare R2 storage and <code>application/</code> plus <code>video/</code> on a Contabo storage. One prefix per line. Longest matching prefix wins; leave empty to disable type routing for this storage (legacy folder/Home behaviour).",
+   "fieldname": "route_mimetypes_starting",
+   "fieldtype": "Small Text",
+   "label": "Route files here when mime type starts with: (one per line)"
   },
   {
    "fieldname": "column_break_clee",
