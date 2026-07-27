@@ -62,6 +62,7 @@ Choose the best setup for you: S3 only for all site files or specified folders, 
 - List all remote objects in bucket (includes too the ones not uploaded trough Frappe)
 - Support for S3 / Minio presigned urls: allowing video streaming capabilities and other S3 functionalities.
 - Presigned url can be used for all files in defined folders but defined by mimetype.
+- File-type (mime) routing: send different mime types to different S3 storages (e.g. images to a Cloudflare R2 bucket, documents and videos to a Contabo bucket) without any code, using the per-storage "Route files here when mime type starts with" field.
 - Files are now streamed by default.
 - Extended settings per External Storage doc:
   - Cache only files smaller than
@@ -82,6 +83,29 @@ Choose the best setup for you: S3 only for all site files or specified folders, 
   - Only files uploaded to that folder will be use that S3 bucket
 - One S3 external storage assigned to "Home" folder:
   - All files uploaded to Frappe will be located within that bucket. Except the files uploaded to "Attachments" that will use the above defined bucket
+
+### File-type (mime) routing
+
+A File with no explicitly-selected storage is first matched by mime type, then by
+folder. Set one mime prefix per line in each storage's **"Route files here when mime
+type starts with"** field:
+
+- Cloudflare R2 storage → `image/`
+- Contabo storage → `application/` and `video/` (one prefix per line)
+
+Now every uploaded image goes to R2 and every document/video goes to Contabo,
+regardless of which folder they land in. The full resolution order is:
+
+1. explicit `DFP External Storage` selected on the File — always wins
+2. **mime-type match** — the ENABLED storage whose configured prefix matches the
+   file's guessed mime type (this step is new; it runs *before* folder routing)
+3. folder match — a storage assigned to the file's folder
+4. the storage that owns the **Home** folder (default)
+
+Non-matching types fall straight through to folder/Home routing, unchanged. When two
+enabled storages claim overlapping prefixes the most specific (longest) prefix wins,
+with the lowest storage name as a deterministic tie-break. Leave the field empty on
+every storage to keep the classic folder-only behaviour — the feature is then a no-op.
 
 ### File actions available
 
