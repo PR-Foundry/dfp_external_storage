@@ -197,6 +197,42 @@ def dfp_bounded_http_client() -> urllib3.PoolManager:
 	)
 
 
+def dfp_mimetype_longest_prefix(mimetype, route_mimetypes_starting):
+	"""Return the longest configured mime prefix that ``mimetype`` starts with.
+
+	``route_mimetypes_starting`` is the newline-separated per-storage field (same
+	format as ``presigned_mimetypes_starting``): whitespace is stripped and blank
+	lines dropped. Returns the most specific (longest) matching prefix, or ``None``
+	when either input is empty or nothing matches — i.e. type routing is off.
+	"""
+	if not mimetype or not route_mimetypes_starting:
+		return None
+	prefixes = [p.strip() for p in route_mimetypes_starting.split("\n") if p.strip()]
+	matches = [p for p in prefixes if mimetype.startswith(p)]
+	return max(matches, key=len) if matches else None
+
+
+def dfp_storage_route_by_mimetype(mimetype, routes):
+	"""Pick the storage a File of ``mimetype`` should route to, or ``None``.
+
+	``routes`` is an iterable of ``(storage_name, route_mimetypes_starting)`` pairs
+	for the ENABLED storages only (the caller is responsible for that filter). The
+	most specific match wins (longest matching prefix); an exact-length tie is
+	broken by the lowest storage name so the result is always deterministic.
+	"""
+	if not mimetype:
+		return None
+	matches = []
+	for name, route_mimetypes_starting in routes:
+		prefix = dfp_mimetype_longest_prefix(mimetype, route_mimetypes_starting)
+		if prefix:
+			matches.append((len(prefix), name))
+	if not matches:
+		return None
+	matches.sort(key=lambda m: (-m[0], m[1]))
+	return matches[0][1]
+
+
 class MinioConnection:
 	def __init__(self, endpoint:str, access_key:str, secret_key:str, region:str, secure:bool):
 		self.client = Minio(

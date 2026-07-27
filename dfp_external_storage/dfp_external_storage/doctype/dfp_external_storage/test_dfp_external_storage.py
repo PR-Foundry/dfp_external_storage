@@ -117,3 +117,50 @@ class TestDFPExternalStorage(FrappeTestCase):
 		timeout = http_client.connection_pool_kw["timeout"]
 		self.assertEqual(timeout.connect_timeout, DFP_S3_CONNECT_TIMEOUT)
 		self.assertEqual(timeout._read, DFP_S3_READ_TIMEOUT)
+
+	def test_longest_prefix_basic_and_empty(self):
+		"""framework#102: file-type routing matches a File's guessed mime type
+		against a storage's newline-separated `route_mimetypes_starting` prefixes.
+		The matcher must strip whitespace, drop blank lines, return the LONGEST
+		matching prefix (most specific wins), and return None when either input is
+		empty or nothing matches (feature off)."""
+		# matches, strips whitespace, drops blank lines
+		self.assertEqual(
+			dfp_mod.dfp_mimetype_longest_prefix("image/png", " image/ \n\n video/ "),
+			"image/",
+		)
+		# most-specific (longest) prefix wins within one storage's list
+		self.assertEqual(
+			dfp_mod.dfp_mimetype_longest_prefix("image/png", "image/\nimage/png"),
+			"image/png",
+		)
+		# no match
+		self.assertIsNone(dfp_mod.dfp_mimetype_longest_prefix("application/pdf", "image/"))
+		# empty inputs => feature off
+		self.assertIsNone(dfp_mod.dfp_mimetype_longest_prefix("image/png", ""))
+		self.assertIsNone(dfp_mod.dfp_mimetype_longest_prefix(None, "image/"))
+
+	def test_route_by_mimetype_precedence(self):
+		"""framework#102: across ENABLED storages, the storage with the longest
+		matching prefix wins; an exact-length tie breaks on the lowest storage name
+		so routing is always deterministic. No match / empty => None (legacy)."""
+		# longest prefix across storages wins (most specific)
+		self.assertEqual(
+			dfp_mod.dfp_storage_route_by_mimetype(
+				"image/png", [("A", "image/"), ("B", "image/png")]
+			),
+			"B",
+		)
+		# equal-length tie => lowest name wins (deterministic)
+		self.assertEqual(
+			dfp_mod.dfp_storage_route_by_mimetype(
+				"image/png", [("Z", "image/"), ("A", "image/")]
+			),
+			"A",
+		)
+		# no match / empty inputs
+		self.assertIsNone(
+			dfp_mod.dfp_storage_route_by_mimetype("application/pdf", [("A", "image/")])
+		)
+		self.assertIsNone(dfp_mod.dfp_storage_route_by_mimetype(None, [("A", "image/")]))
+		self.assertIsNone(dfp_mod.dfp_storage_route_by_mimetype("image/png", []))
