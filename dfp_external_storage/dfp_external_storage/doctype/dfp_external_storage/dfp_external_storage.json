@@ -110,7 +110,7 @@
    "fieldtype": "Column Break"
   },
   {
-   "description": "Select one or more specific folders. Select \"<strong>Home</strong>\" and ALL files will be uploaded to this remote (If done, you should add some ignored Doctypes, like mentioned within \"Doctypes ignored for file attachments\" below advanced settings).",
+   "description": "<strong>Optional.</strong> A storage does not need any folder: it can also be chosen explicitly on a File, or by mime-type routing (see \"Route files here when mime type starts with\" above). A File's storage is resolved in this order: <strong>(1)</strong> the storage explicitly selected on the File, <strong>(2)</strong> a mime-type route match, <strong>(3)</strong> a folder assigned here, <strong>(4)</strong> the storage that owns the <strong>Home</strong> folder (fallback). Select \"<strong>Home</strong>\" and ALL files will be uploaded to this remote (if done, add some ignored Doctypes under \"Doctypes ignored for file attachments\" in advanced settings). A folder can belong to only one storage.",
    "fieldname": "folders",
    "fieldtype": "Table MultiSelect",
    "label": "Folder(s)",

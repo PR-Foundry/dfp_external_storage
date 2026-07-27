@@ -241,3 +241,13 @@ class TestDFPExternalStorage(FrappeTestCase):
 			explicit=None, mimetype="application/pdf", folder="Home",
 			storages={"A": {"enabled": 1, "route_mimetypes_starting": "image/"}},
 		))
+
+	def test_type_routing_needs_no_folder_assignment(self):
+		"""framework#102 (addendum): a storage with NO folder assigned but a matching
+		`route_mimetypes_starting` is still resolved for a matching file. `_run_resolver`
+		makes the folder lookup return None (no DFP-by-folder rows), so only the mime
+		route can select storage A — proving folder assignment is optional for routing."""
+		self.assertEqual(self._run_resolver(
+			explicit=None, mimetype="image/png", folder="Some/Unbound/Folder",
+			storages={"A": {"enabled": 1, "route_mimetypes_starting": "image/"}},
+		), "A")
