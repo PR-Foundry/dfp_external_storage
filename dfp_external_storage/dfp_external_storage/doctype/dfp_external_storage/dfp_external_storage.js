@@ -28,24 +28,27 @@ frappe.ui.form.on('DFP External Storage', {
 			}
 		})
 
+		// Exclude only folders already owned by a DIFFERENT storage, so the
+		// "one folder -> one storage" invariant holds without hiding unassigned
+		// folders or this storage's own already-assigned folders. `parent` is the
+		// owning storage's docname; `folder` is the assigned File folder. (The
+		// previous code compared the CHILD row `name` to the PARENT docname — they
+		// never match, so it wrongly excluded every assigned folder.)
 		frappe.db.get_list(
 			'DFP External Storage by Folder',
-			{fields: ['name','folder']}
+			{fields: ['parent', 'folder'], parent: 'DFP External Storage'}
 		).then(data => {
-			if (data && data.length) {
-				let folders_name_not_assigned = data
-					.filter(d => d.name != frm.doc.name ? d : null)
-					.map(d => d.folder)
-				frm.set_query('folders', function () {
-					return {
-						filters: {
-							is_folder: 1,
-							name: ['not in', folders_name_not_assigned],
-						},
-					}
-				})
-
-			}
+			let folders_owned_by_other_storages = (data || [])
+				.filter(d => d.parent != frm.doc.name)
+				.map(d => d.folder)
+			frm.set_query('folders', function () {
+				return {
+					filters: {
+						is_folder: 1,
+						name: ['not in', folders_owned_by_other_storages],
+					},
+				}
+			})
 		})
 
 	},
