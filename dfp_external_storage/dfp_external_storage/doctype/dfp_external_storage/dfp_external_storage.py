@@ -856,8 +856,40 @@ def dfp_forget_cached_file(name:str):
 	row and re-caches the old public copy. The second clear, after the commit, closes it.
 	"""
 	cache_key = f"{DFP_EXTERNAL_STORAGE_PUBLIC_CACHE_PREFIX}{name}"
-	frappe.cache().delete_value(cache_key)
-	frappe.db.after_commit.add(lambda: frappe.cache().delete_value(cache_key))
+
+	def forget():
+		# Bump the generation first: a request that loaded the file before this point then
+		# finds it moved and does not write its (possibly stale) response back.
+		dfp_cache_generation_bump(name)
+		frappe.cache().delete_value(cache_key)
+
+	forget()
+	frappe.db.after_commit.add(forget)
+
+
+def dfp_cache_generation_key(name:str) -> str:
+	"""Redis key counting how often File `name` was forgotten (PR-Foundry/framework#332 re-review).
+
+	A request that loaded the old public row before a commit could otherwise write its response
+	into the cache after the after-commit clear, and that stale copy would then be served with no
+	permission check until it expired. file() reads the generation before loading the file and
+	writes the cache only if it is unchanged.
+	"""
+	return f"{DFP_EXTERNAL_STORAGE_PUBLIC_CACHE_PREFIX}generation:{name}"
+
+
+# Raw Redis on the site-prefixed key: frappe's get_value pickles and keeps a request-local copy,
+# so a second read in the same request would always agree with the first.
+def dfp_cache_generation(name:str) -> int:
+	cache = frappe.cache()
+	return int(cache.get(cache.make_key(dfp_cache_generation_key(name))) or 0)
+
+
+def dfp_cache_generation_bump(name:str):
+	cache = frappe.cache()
+	key = cache.make_key(dfp_cache_generation_key(name))
+	cache.incr(key)
+	cache.expire(key, 60 * 60 * 24)  # outlives any request that could still be loading the file
 
 
 def hook_file_on_update(doc, method):
@@ -969,6 +1001,7 @@ def file(name:str, file:str):
 
 	cache_key = f"{DFP_EXTERNAL_STORAGE_PUBLIC_CACHE_PREFIX}{name}"
 
+	generation = dfp_cache_generation(name)
 	response_values = frappe.cache().get_value(cache_key)
 	cache_hit = bool(response_values)
 	if cache_hit and not any(h[0] == "Cache-Control" for h in response_values.get("headers", [])):
@@ -1020,7 +1053,8 @@ def file(name:str, file:str):
 				doc.dfp_external_storage_doc.setting_cache_expiration_secs)))
 		response_values["status"] = 200
 
-		if doc.dfp_is_cacheable():
+		# Not if the file was forgotten while this request loaded it (framework#332 re-review).
+		if doc.dfp_is_cacheable() and dfp_cache_generation(name) == generation:
 			frappe.cache().set_value(key=cache_key,
 				val=response_values,
 				expires_in_sec=doc.dfp_external_storage_doc.setting_cache_expiration_secs)
