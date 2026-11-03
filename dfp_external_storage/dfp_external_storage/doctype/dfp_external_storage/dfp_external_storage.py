@@ -3,6 +3,7 @@ import os
 import re
 import io
 import mimetypes
+import redis.exceptions
 import typing as t
 from datetime import timedelta
 from urllib.parse import quote
@@ -879,17 +880,27 @@ def dfp_cache_generation_key(name:str) -> str:
 
 
 # Raw Redis on the site-prefixed key: frappe's get_value pickles and keeps a request-local copy,
-# so a second read in the same request would always agree with the first.
-def dfp_cache_generation(name:str) -> int:
+# so a second read in the same request would always agree with the first. Unlike get_value, raw
+# calls do not swallow a lost Redis, so both helpers do: an unreachable cache must not 500 every
+# /file/ request or fail File saves (framework#332 review).
+def dfp_cache_generation(name:str) -> int | None:
+	"""The file's generation, or None when Redis cannot be read (then nothing is cached)."""
 	cache = frappe.cache()
-	return int(cache.get(cache.make_key(dfp_cache_generation_key(name))) or 0)
+	try:
+		return int(cache.get(cache.make_key(dfp_cache_generation_key(name))) or 0)
+	except redis.exceptions.ConnectionError:
+		return None
 
 
 def dfp_cache_generation_bump(name:str):
 	cache = frappe.cache()
 	key = cache.make_key(dfp_cache_generation_key(name))
-	cache.incr(key)
-	cache.expire(key, 60 * 60 * 24)  # outlives any request that could still be loading the file
+	try:
+		cache.incr(key)
+		cache.expire(key, 60 * 60 * 24)  # outlives any request that could still be loading the file
+	except redis.exceptions.ConnectionError:
+		# No Redis, no cached copy to protect: the delete that follows is a no-op too.
+		pass
 
 
 def hook_file_on_update(doc, method):
@@ -1003,6 +1014,11 @@ def file(name:str, file:str):
 
 	generation = dfp_cache_generation(name)
 	response_values = frappe.cache().get_value(cache_key)
+	# A copy written by a request that loaded the file before it was forgotten carries the old
+	# generation: the check before the write and the write itself are two steps, so a forget can
+	# land between them. Treat such a copy as a miss (framework#332 review).
+	if response_values and (generation is None or response_values.get("generation", 0) != generation):
+		response_values = None
 	cache_hit = bool(response_values)
 	if cache_hit and not any(h[0] == "Cache-Control" for h in response_values.get("headers", [])):
 		# Only public files are ever cached here; an entry written before
@@ -1054,12 +1070,13 @@ def file(name:str, file:str):
 		response_values["status"] = 200
 
 		# Not if the file was forgotten while this request loaded it (framework#332 re-review).
-		if doc.dfp_is_cacheable() and dfp_cache_generation(name) == generation:
+		if doc.dfp_is_cacheable() and generation is not None and dfp_cache_generation(name) == generation:
 			frappe.cache().set_value(key=cache_key,
-				val=response_values,
+				val={**response_values, "generation": generation},
 				expires_in_sec=doc.dfp_external_storage_doc.setting_cache_expiration_secs)
 
 	if "status" in response_values and response_values["status"] == 200:
+		response_values.pop("generation", None)
 		return Response(**response_values)
 
 	raise frappe.PageDoesNotExistError()
