@@ -781,6 +781,32 @@ class DFPExternalStorageFile(File):
 		return self.dfp_external_storage_client.presigned_get_object(bucket_name=self.dfp_external_storage_doc.bucket_name, object_name=self.dfp_external_storage_s3_key, expires=self.dfp_external_storage_doc.setting_presigned_url_expiration)
 
 
+def dfp_remove_object_after_commit(previous):
+	"""Remove ``previous``'s object from its bucket once the move is committed (Floreer-Africa/framework#286).
+
+	Removing it inline deleted the object before the transaction committed, so a
+	save that failed later left the row pointing at a key that no longer existed.
+	It also ignored other File rows on the same bucket and key: choosing an
+	existing library image creates exactly such a copy, and every copy's image
+	broke. Checked at commit time, so a sibling repointed in the same transaction
+	does not keep the object alive.
+	"""
+	storage = previous.dfp_external_storage
+	key = previous.dfp_external_storage_s3_key
+	bucket = previous.dfp_external_storage_doc.bucket_name
+	client = previous.dfp_external_storage_client
+
+	def remove():
+		if frappe.db.exists("File", {"dfp_external_storage": storage, "dfp_external_storage_s3_key": key}):
+			return
+		try:
+			client.remove_object(bucket_name=bucket, object_name=key)
+		except Exception:
+			frappe.log_error(title=f"Error removing moved file from previous remote: {key}")
+
+	frappe.db.after_commit.add(remove)
+
+
 def hook_file_before_save(doc, method):
 	"""
 	This method is called before the document is saved to DB (insert or update row)
@@ -834,10 +860,7 @@ def hook_file_before_save(doc, method):
 					)
 				# New s3 key => update "file_url"
 				doc.file_url = doc._remote_file_local_path_get()
-				# Remove file from previous remote
-				previous.dfp_external_storage_client.remove_object(
-					bucket_name=previous.dfp_external_storage_doc.bucket_name,
-					object_name=previous.dfp_external_storage_s3_key)
+				dfp_remove_object_after_commit(previous)
 		except:
 			error_msg = _("Error putting file from one remote to another.")
 			frappe.log_error(f"{error_msg}: {doc.file_name}")
