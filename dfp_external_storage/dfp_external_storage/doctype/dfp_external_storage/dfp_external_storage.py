@@ -608,27 +608,17 @@ class DFPExternalStorageFile(File):
 	def dfp_external_storage_delete_file(self):
 		if not self.dfp_is_s3_remote_file():
 			return
-		# Do not delete if other file docs are using same dfp_external_storage
-		# and dfp_external_storage_s3_key
-		files_using_s3_key = frappe.get_all("File", filters={
-			"dfp_external_storage_s3_key": self.dfp_external_storage_s3_key,
-			"dfp_external_storage": self.dfp_external_storage
-		})
-		if len(files_using_s3_key):
-			return
-		error_msg = _("Error deleting file in remote folder.")
 		# Only delete if connection is enabled
 		if not self.dfp_external_storage_doc or not self.dfp_external_storage_doc.enabled:
+			error_msg = _("Error deleting file in remote folder.")
 			error_extra = _("Write disabled for connection <strong>{}</strong>").format(
 				self.dfp_external_storage_doc.title)
 			frappe.throw(f"{error_msg} {error_extra}")
-		try:
-			self.dfp_external_storage_client.remove_object(
-				bucket_name=self.dfp_external_storage_doc.bucket_name,
-				object_name=self.dfp_external_storage_s3_key)
-		except Exception as e:
-			frappe.log_error(f"{error_msg}: {self.file_name}", message=e)
-			frappe.throw(f"{error_msg} {str(e)}")
+		# After commit, and only while no File row on this bucket still uses the key
+		# (PR-Foundry/framework#338 review): a delete that rolls back keeps its object.
+		dfp_remove_object_after_commit(
+			self.dfp_external_storage_doc, self.dfp_external_storage_client, self.dfp_external_storage_s3_key
+		)
 
 	def dfp_external_storage_download_to_file(self, local_file):
 		"""
@@ -692,7 +682,9 @@ class DFPExternalStorageFile(File):
 
 	def download_to_local_and_remove_remote(self):
 		try:
-			bucket = self.dfp_external_storage_doc.bucket_name
+			storage_doc = self.dfp_external_storage_doc
+			client = self.dfp_external_storage_client
+			bucket = storage_doc.bucket_name
 			key = self.dfp_external_storage_s3_key
 
 			self.dfp_external_storage_s3_key = ""
@@ -702,7 +694,9 @@ class DFPExternalStorageFile(File):
 				self._content = response.read()
 			self.save_file_on_filesystem()
 
-			self.dfp_external_storage_client.remove_object(bucket_name=bucket, object_name=key)
+			# Not inline: a save that fails later, or a sibling row on the same key, would
+			# lose the object (PR-Foundry/framework#338 review).
+			dfp_remove_object_after_commit(storage_doc, client, key)
 		except:
 			error_msg = _("Error downloading and removing file from remote folder.")
 			frappe.log_error(title=f"{error_msg}: {self.file_name}")
@@ -781,28 +775,43 @@ class DFPExternalStorageFile(File):
 		return self.dfp_external_storage_client.presigned_get_object(bucket_name=self.dfp_external_storage_doc.bucket_name, object_name=self.dfp_external_storage_s3_key, expires=self.dfp_external_storage_doc.setting_presigned_url_expiration)
 
 
-def dfp_remove_object_after_commit(previous):
-	"""Remove ``previous``'s object from its bucket once the move is committed (Floreer-Africa/framework#286).
+def dfp_remove_object_after_commit(storage_doc, client, key):
+	"""Remove a File's object from its bucket once the transaction commits (Floreer-Africa/framework#286).
 
-	Removing it inline deleted the object before the transaction committed, so a
-	save that failed later left the row pointing at a key that no longer existed.
-	It also ignored other File rows on the same bucket and key: choosing an
-	existing library image creates exactly such a copy, and every copy's image
-	broke. Checked at commit time, so a sibling repointed in the same transaction
-	does not keep the object alive.
+	Every path that drops an object (a move to another storage, a move back to local
+	disk, a delete) goes through here. Removing it inline deleted the object before
+	the transaction committed, so a save or delete that failed later left a row
+	pointing at a key that no longer existed. It also ignored other File rows on the
+	same bucket and key: choosing an existing library image creates exactly such a
+	copy, and every copy's image broke.
+
+	Siblings are matched by bucket, not by storage name: two storages can point at one
+	bucket (folder routing makes that natural), and an object moved between them is the
+	same object (PR-Foundry/framework#338 review). Checked at commit time, so a sibling
+	repointed in the same transaction does not keep the object alive.
+
+	Args:
+	    storage_doc: the storage the object is in, read before the File was repointed.
+	    client: that storage's S3 client.
+	    key: the object's S3 key.
 	"""
-	storage = previous.dfp_external_storage
-	key = previous.dfp_external_storage_s3_key
-	bucket = previous.dfp_external_storage_doc.bucket_name
-	client = previous.dfp_external_storage_client
+	if not key or not storage_doc:
+		return
+	bucket = storage_doc.bucket_name
+	endpoint = storage_doc.endpoint
 
 	def remove():
-		if frappe.db.exists("File", {"dfp_external_storage": storage, "dfp_external_storage_s3_key": key}):
+		same_bucket = frappe.get_all(
+			"DFP External Storage", filters={"bucket_name": bucket, "endpoint": endpoint}, pluck="name"
+		) or [storage_doc.name]
+		if frappe.db.exists(
+			"File", {"dfp_external_storage": ["in", same_bucket], "dfp_external_storage_s3_key": key}
+		):
 			return
 		try:
 			client.remove_object(bucket_name=bucket, object_name=key)
 		except Exception:
-			frappe.log_error(title=f"Error removing moved file from previous remote: {key}")
+			frappe.log_error(title=f"Error removing file from remote: {key}")
 
 	frappe.db.after_commit.add(remove)
 
@@ -860,7 +869,11 @@ def hook_file_before_save(doc, method):
 					)
 				# New s3 key => update "file_url"
 				doc.file_url = doc._remote_file_local_path_get()
-				dfp_remove_object_after_commit(previous)
+				dfp_remove_object_after_commit(
+					previous.dfp_external_storage_doc,
+					previous.dfp_external_storage_client,
+					previous.dfp_external_storage_s3_key,
+				)
 		except:
 			error_msg = _("Error putting file from one remote to another.")
 			frappe.log_error(f"{error_msg}: {doc.file_name}")
