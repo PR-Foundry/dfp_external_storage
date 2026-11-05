@@ -853,6 +853,10 @@ def hook_file_before_save(doc, method):
 
 	# MODIFY "File": Case 2: Existent remote file + no storage selected => download to local + remove from remote
 	elif previous.dfp_external_storage and not doc.dfp_external_storage:
+		# The privacy this save sets, not the one it had: File.handle_is_private_changed skips
+		# a remote file, so ticking Is Private in the same save would otherwise land the file
+		# in public/files, served with no permission check (PR-Foundry/framework#338 review).
+		previous.is_private = doc.is_private
 		previous.download_to_local_and_remove_remote()
 		doc.file_url = previous.file_url # << contains local file path downloaded
 		doc.dfp_external_storage_s3_key = ""
@@ -863,6 +867,7 @@ def hook_file_before_save(doc, method):
 			# MODIFY "File": Case 3.1.: new remote + not allowed doctype => download to local + remove old remote
 			# TODO: Maybe we should left in old remote?? and we should check if old remote allows the doctype??
 			if doc.dfp_external_storage_ignored_doctypes():
+				previous.is_private = doc.is_private
 				previous.download_to_local_and_remove_remote()
 				doc.file_url = previous.file_url # << contains local file path downloaded
 				doc.dfp_external_storage_s3_key = ""
