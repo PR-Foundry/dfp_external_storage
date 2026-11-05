@@ -703,7 +703,19 @@ class DFPExternalStorageFile(File):
 			frappe.throw(error_msg)
 
 	def validate_file_on_disk(self):
-		return True if self.dfp_is_s3_remote_file() else super(DFPExternalStorageFile, self).validate_file_on_disk()
+		if self.dfp_is_s3_remote_file() or self.dfp_leaving_external_storage():
+			return True
+		return super(DFPExternalStorageFile, self).validate_file_on_disk()
+
+	def dfp_leaving_external_storage(self):
+		"""The storage was cleared on a stored file, which is still remote until
+		hook_file_before_save (case 2) downloads it. That hook runs after validate,
+		so without this the disk check refuses every move back to local disk on a
+		site with no fallback storage (PR-Foundry/framework#338)."""
+		if not self.dfp_external_storage_s3_key or self.dfp_external_storage:
+			return False
+		previous = self.get_doc_before_save()
+		return bool(previous and previous.get("dfp_external_storage"))
 
 	def exists_on_disk(self):
 		return False if self.dfp_is_s3_remote_file() else super(DFPExternalStorageFile, self).exists_on_disk()
